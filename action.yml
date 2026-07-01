@@ -1,0 +1,96 @@
+name: 'Busbar — run CumulusCI under the nono sandbox'
+description: >-
+  Run a CumulusCI flow/task against a Busbar-equipped Salesforce org with the
+  OIDC-minted session injected proxy-side (cci never holds the token) and the
+  process confined by nono (filesystem grants + ProxyOnly egress). Backed by the
+  busbar-sandbox-run binary; self-mints via GitHub OIDC — the caller job MUST
+  grant `permissions: id-token: write` and the org must have an active trust rule
+  for this repository/workflow.
+author: 'busbar.agency'
+branding:
+  icon: 'shield'
+  color: 'green'
+
+inputs:
+  target-instance:
+    description: 'Instance URL of the Busbar-equipped org (e.g. https://my.my.salesforce.com).'
+    required: true
+  cci-args:
+    description: >-
+      CumulusCI arguments, e.g. `task run query --org dev -o object Organization
+      -o query "SELECT Id, Name FROM Organization"` or `flow run dev_org --org dev`.
+    required: true
+  org-name:
+    description: 'cci org name to register via the EnvironmentProjectKeychain (matches --org in cci-args).'
+    required: false
+    default: 'dev'
+  cumulusci-version:
+    description: 'pip version spec for CumulusCI (empty => latest).'
+    required: false
+    default: ''
+  working-directory:
+    description: 'CumulusCI project directory (must contain cumulusci.yml).'
+    required: false
+    default: '.'
+  allow-hosts:
+    description: 'Extra hosts the sandboxed child may reach over a plain CONNECT tunnel (comma-separated). The org host is always allowed.'
+    required: false
+    default: 'pypi.org,files.pythonhosted.org'
+  version:
+    description: 'busbar-sandbox-run release tag to download ("latest" resolves the most recent).'
+    required: false
+    default: 'latest'
+  binary-repo:
+    description: 'GitHub repo that publishes the busbar-sandbox-run binary releases.'
+    required: false
+    default: 'busbar-actions/actions-dist'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install the busbar-sandbox-run binary from actions-dist (<1s)
+      uses: busbar-actions/setup@main
+      with:
+        binary: busbar-sandbox-run
+        version: ${{ inputs.version }}
+        binary-repo: ${{ inputs.binary-repo }}
+
+    - name: Install CumulusCI
+      shell: bash
+      env:
+        CCI_VERSION: ${{ inputs.cumulusci-version }}
+      run: |
+        set -euo pipefail
+        if [ -n "${CCI_VERSION}" ]; then
+          pip install --upgrade "cumulusci==${CCI_VERSION}"
+        else
+          pip install --upgrade cumulusci
+        fi
+        echo "cci on PATH: $(command -v cci)"
+        cci version
+
+    - name: Run CumulusCI under the busbar sandbox
+      shell: bash
+      env:
+        # OIDC self-mint target for busbar-auth (no SF_ACCESS_TOKEN => OIDC).
+        SF_INSTANCE_URL: ${{ inputs.target-instance }}
+        # Sandbox config (consumed by busbar-sandbox-run, not by cci).
+        BUSBAR_SANDBOX_WORKDIR: ${{ inputs.working-directory }}
+        BUSBAR_SANDBOX_ALLOW_HOSTS: ${{ inputs.allow-hosts }}
+        # cci org via the env keychain: a PHANTOM token (the proxy strips it and
+        # injects the real OIDC-minted Bearer); the instance_url must match the
+        # injecting route so cci's calls are intercepted + authed.
+        CUMULUSCI_KEYCHAIN_CLASS: cumulusci.core.keychain.EnvironmentProjectKeychain
+        CUMULUSCI_DISABLE_REFRESH: '1'
+        ORG_NAME: ${{ inputs.org-name }}
+        TARGET_INSTANCE: ${{ inputs.target-instance }}
+        CCI_ARGS: ${{ inputs.cci-args }}
+      run: |
+        set -euo pipefail
+        # Session-id-shaped phantom token so cci can parse an org id locally; the
+        # real value is irrelevant (the proxy overwrites the Authorization header).
+        org_json=$(printf '{"instance_url":"%s","access_token":"00Dxx0000000000!phantom","config_name":"dev"}' "${TARGET_INSTANCE}")
+        export "CUMULUSCI_ORG_${ORG_NAME}=${org_json}"
+        echo "Running (sandboxed; SF session injected proxy-side): cci ${CCI_ARGS}"
+        # shellcheck disable=SC2086 -- cci-args is an intentional argument list.
+        busbar-sandbox-run cci ${CCI_ARGS}
