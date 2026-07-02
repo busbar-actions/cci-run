@@ -44,6 +44,16 @@ inputs:
     description: 'GitHub repo that publishes the busbar-sandbox-run binary releases.'
     required: false
     default: 'busbar-actions/actions-dist'
+  token-handler:
+    description: >-
+      OIDC token-exchange handler developer name in the org. Defaults to the
+      current name; overrides busbar-auth's stale compiled "BB*" default.
+    required: false
+    default: 'GitHubTokenExchangeHandler'
+  eca-client-id:
+    description: 'Optional ECA consumer-key override for the OIDC exchange (empty => busbar-auth default).'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -74,6 +84,9 @@ runs:
       env:
         # OIDC self-mint target for busbar-auth (no SF_ACCESS_TOKEN => OIDC).
         SF_INSTANCE_URL: ${{ inputs.target-instance }}
+        # Correct handler name (busbar-auth's compiled default is the stale BB*).
+        TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
+        ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
         # Sandbox config (consumed by busbar-sandbox-run, not by cci).
         BUSBAR_SANDBOX_WORKDIR: ${{ inputs.working-directory }}
         BUSBAR_SANDBOX_ALLOW_HOSTS: ${{ inputs.allow-hosts }}
