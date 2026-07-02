@@ -65,6 +65,12 @@ inputs:
     description: 'Dotted path of the CumulusCI keychain class that provisions the org through the Busbar proxy.'
     required: false
     default: 'busbar_cci_keychain.BusbarKeychain'
+  audit-out:
+    description: >-
+      Path to write the observed-endpoint declaration (host+method+path+decision,
+      distilled from the proxy audit stream). Empty => not written.
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -117,6 +123,8 @@ runs:
         # Sandbox config (consumed by busbar-sandbox-run, not by cci).
         BUSBAR_SANDBOX_WORKDIR: ${{ inputs.working-directory }}
         BUSBAR_SANDBOX_ALLOW_HOSTS: ${{ inputs.allow-hosts }}
+        # Write the observed-endpoint declaration from the proxy audit stream.
+        BUSBAR_SANDBOX_AUDIT_OUT: ${{ inputs.audit-out }}
         # The org is provided by the Busbar keychain: it synthesizes an OrgConfig
         # from SF_INSTANCE_URL and resolves the REAL identity through the proxy.
         # No CUMULUSCI_ORG_* blob, no fabricated token, no invented org id.
