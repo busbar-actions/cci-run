@@ -54,6 +54,17 @@ inputs:
     description: 'Optional ECA consumer-key override for the OIDC exchange (empty => busbar-auth default).'
     required: false
     default: ''
+  keychain-package:
+    description: >-
+      pip install spec for the Busbar CumulusCI keychain (e.g. a path such as
+      "$GITHUB_WORKSPACE/cumulusci" in the checked-out project, or a git URL).
+      Empty => the keychain class must already be importable in the environment.
+    required: false
+    default: ''
+  keychain-class:
+    description: 'Dotted path of the CumulusCI keychain class that provisions the org through the Busbar proxy.'
+    required: false
+    default: 'busbar_cci_keychain.BusbarKeychain'
 
 runs:
   using: 'composite'
@@ -79,6 +90,22 @@ runs:
         echo "cci on PATH: $(command -v cci)"
         cci version
 
+    - name: Install the Busbar CumulusCI keychain
+      if: ${{ inputs.keychain-package != '' }}
+      shell: bash
+      env:
+        KEYCHAIN_PACKAGE: ${{ inputs.keychain-package }}
+        KEYCHAIN_CLASS: ${{ inputs.keychain-class }}
+      run: |
+        set -euo pipefail
+        pip install "${KEYCHAIN_PACKAGE}"
+        python - <<'PY'
+        import importlib, os
+        mod, name = os.environ["KEYCHAIN_CLASS"].rsplit(".", 1)
+        getattr(importlib.import_module(mod), name)
+        print(f"keychain {os.environ['KEYCHAIN_CLASS']} import OK")
+        PY
+
     - name: Run CumulusCI under the busbar sandbox
       shell: bash
       env:
@@ -90,20 +117,14 @@ runs:
         # Sandbox config (consumed by busbar-sandbox-run, not by cci).
         BUSBAR_SANDBOX_WORKDIR: ${{ inputs.working-directory }}
         BUSBAR_SANDBOX_ALLOW_HOSTS: ${{ inputs.allow-hosts }}
-        # cci org via the env keychain: a PHANTOM token (the proxy strips it and
-        # injects the real OIDC-minted Bearer); the instance_url must match the
-        # injecting route so cci's calls are intercepted + authed.
-        CUMULUSCI_KEYCHAIN_CLASS: cumulusci.core.keychain.EnvironmentProjectKeychain
-        CUMULUSCI_DISABLE_REFRESH: '1'
-        ORG_NAME: ${{ inputs.org-name }}
-        TARGET_INSTANCE: ${{ inputs.target-instance }}
+        # The org is provided by the Busbar keychain: it synthesizes an OrgConfig
+        # from SF_INSTANCE_URL and resolves the REAL identity through the proxy.
+        # No CUMULUSCI_ORG_* blob, no fabricated token, no invented org id.
+        CUMULUSCI_KEYCHAIN_CLASS: ${{ inputs.keychain-class }}
+        BUSBAR_CCI_ORG: ${{ inputs.org-name }}
         CCI_ARGS: ${{ inputs.cci-args }}
       run: |
         set -euo pipefail
-        # Session-id-shaped phantom token so cci can parse an org id locally; the
-        # real value is irrelevant (the proxy overwrites the Authorization header).
-        org_json=$(printf '{"instance_url":"%s","access_token":"00Dxx0000000000!phantom","config_name":"dev"}' "${TARGET_INSTANCE}")
-        export "CUMULUSCI_ORG_${ORG_NAME}=${org_json}"
         echo "Running (sandboxed; SF session injected proxy-side): cci ${CCI_ARGS}"
         # Parse CCI_ARGS into argv while RESPECTING quotes, so a SOQL string with
         # spaces (e.g. -o query "SELECT ...") stays a single argument, then run
