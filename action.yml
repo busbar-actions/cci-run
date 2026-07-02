@@ -105,5 +105,8 @@ runs:
         org_json=$(printf '{"instance_url":"%s","access_token":"00Dxx0000000000!phantom","config_name":"dev"}' "${TARGET_INSTANCE}")
         export "CUMULUSCI_ORG_${ORG_NAME}=${org_json}"
         echo "Running (sandboxed; SF session injected proxy-side): cci ${CCI_ARGS}"
-        # shellcheck disable=SC2086 -- cci-args is an intentional argument list.
-        busbar-sandbox-run cci ${CCI_ARGS}
+        # Parse CCI_ARGS into argv while RESPECTING quotes, so a SOQL string with
+        # spaces (e.g. -o query "SELECT ...") stays a single argument, then run
+        # under the sandbox.
+        eval "set -- ${CCI_ARGS}"
+        busbar-sandbox-run cci "$@"
