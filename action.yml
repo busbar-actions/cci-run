@@ -71,6 +71,13 @@ inputs:
       distilled from the proxy audit stream). Empty => not written.
     required: false
     default: ''
+  allowlist:
+    description: >-
+      Path to an endpoint declaration (from a prior audit-out run) to ENFORCE:
+      the org route becomes default-deny, allowing only the recorded endpoints
+      (dynamic path segments generalized to `*`). Empty => no enforcement.
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -125,6 +132,8 @@ runs:
         BUSBAR_SANDBOX_ALLOW_HOSTS: ${{ inputs.allow-hosts }}
         # Write the observed-endpoint declaration from the proxy audit stream.
         BUSBAR_SANDBOX_AUDIT_OUT: ${{ inputs.audit-out }}
+        # Enforce a prior declaration as a default-deny endpoint allowlist.
+        BUSBAR_SANDBOX_ALLOWLIST: ${{ inputs.allowlist }}
         # The org is provided by the Busbar keychain: it synthesizes an OrgConfig
         # from SF_INSTANCE_URL and resolves the REAL identity through the proxy.
         # No CUMULUSCI_ORG_* blob, no fabricated token, no invented org id.
