@@ -46,8 +46,8 @@ inputs:
     default: 'busbar-actions/actions-dist'
   token-handler:
     description: >-
-      OIDC token-exchange handler developer name in the org. Defaults to the
-      current name; overrides busbar-auth's stale compiled "BB*" default.
+      OIDC token-exchange handler developer name in the org. Empty/default =>
+      busbar-auth's default (GitHubTokenExchangeHandler).
     required: false
     default: 'GitHubTokenExchangeHandler'
   eca-client-id:
@@ -78,6 +78,14 @@ inputs:
       (dynamic path segments generalized to `*`). Empty => no enforcement.
     required: false
     default: ''
+  expect-denial:
+    description: >-
+      Invert the exit code for NEGATIVE enforcement tests. When `true`, this action
+      SUCCEEDS (exit 0) if the sandboxed cci command is DENIED (fails, e.g. by the
+      `allowlist`) and FAILS if it unexpectedly succeeds — so the step does not
+      surface a spurious "Process completed with exit code 1".
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -124,7 +132,7 @@ runs:
       env:
         # OIDC self-mint target for busbar-auth (no SF_ACCESS_TOKEN => OIDC).
         SF_INSTANCE_URL: ${{ inputs.target-instance }}
-        # Correct handler name (busbar-auth's compiled default is the stale BB*).
+        # Handler dev name (empty => busbar-auth's default, GitHubTokenExchangeHandler).
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
         ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
         # Sandbox config (consumed by busbar-sandbox-run, not by cci).
@@ -140,6 +148,7 @@ runs:
         CUMULUSCI_KEYCHAIN_CLASS: ${{ inputs.keychain-class }}
         BUSBAR_CCI_ORG: ${{ inputs.org-name }}
         CCI_ARGS: ${{ inputs.cci-args }}
+        EXPECT_DENIAL: ${{ inputs.expect-denial }}
       run: |
         set -euo pipefail
         echo "Running (sandboxed; SF session injected proxy-side): cci ${CCI_ARGS}"
@@ -147,4 +156,14 @@ runs:
         # spaces (e.g. -o query "SELECT ...") stays a single argument, then run
         # under the sandbox.
         eval "set -- ${CCI_ARGS}"
-        busbar-sandbox-run cci "$@"
+        if [ "${EXPECT_DENIAL}" = "true" ]; then
+          # Negative enforcement test: the command MUST be denied. Invert the exit
+          # so this step passes cleanly (no spurious "exit code 1" annotation).
+          if busbar-sandbox-run cci "$@"; then
+            echo "::error::expected the sandboxed cci command to be DENIED, but it succeeded"
+            exit 1
+          fi
+          echo "✓ sandboxed cci command was denied as expected"
+        else
+          busbar-sandbox-run cci "$@"
+        fi
