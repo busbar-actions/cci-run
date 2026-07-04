@@ -86,6 +86,13 @@ inputs:
       surface a spurious "Process completed with exit code 1".
     required: false
     default: 'false'
+  artifact-name:
+    description: >-
+      Name for the uploaded audit + generalized-fingerprint artifact. Must be
+      UNIQUE within a workflow run — set a distinct value per cci-run step in a
+      multi-step job (upload-artifact rejects duplicate names).
+    required: false
+    default: 'busbar-sandbox-cci'
 
 runs:
   using: 'composite'
@@ -138,8 +145,11 @@ runs:
         # Sandbox config (consumed by busbar-sandbox-run, not by cci).
         BUSBAR_SANDBOX_WORKDIR: ${{ inputs.working-directory }}
         BUSBAR_SANDBOX_ALLOW_HOSTS: ${{ inputs.allow-hosts }}
-        # Write the observed-endpoint declaration from the proxy audit stream.
-        BUSBAR_SANDBOX_AUDIT_OUT: ${{ inputs.audit-out }}
+        # Always write the {org}-masked endpoint declaration + the generalized
+        # capability fingerprint (uploaded as artifacts below). `audit-out`
+        # overrides the declaration path (e.g. to feed a later enforce step).
+        BUSBAR_SANDBOX_AUDIT_OUT: ${{ inputs.audit-out != '' && inputs.audit-out || format('{0}/busbar-sandbox-audit.json', runner.temp) }}
+        BUSBAR_SANDBOX_FINGERPRINT_OUT: ${{ format('{0}/busbar-sandbox-fingerprint.json', runner.temp) }}
         # Enforce a prior declaration as a default-deny endpoint allowlist.
         BUSBAR_SANDBOX_ALLOWLIST: ${{ inputs.allowlist }}
         # The org is provided by the Busbar keychain: it synthesizes an OrgConfig
@@ -167,3 +177,14 @@ runs:
         else
           busbar-sandbox-run cci "$@"
         fi
+
+    - name: Upload sandbox audit + generalized fingerprint
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ inputs.audit-out != '' && inputs.audit-out || format('{0}/busbar-sandbox-audit.json', runner.temp) }}
+          ${{ format('{0}/busbar-sandbox-fingerprint.json', runner.temp) }}
+        if-no-files-found: warn
+        retention-days: 30
