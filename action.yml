@@ -110,12 +110,16 @@ runs:
         CCI_VERSION: ${{ inputs.cumulusci-version }}
       run: |
         set -euo pipefail
+        echo "::group::Installing CumulusCI${CCI_VERSION:+ ${CCI_VERSION}} (pip install cumulusci + ~40 transitive deps)"
+        started=$(date +%s)
         if [ -n "${CCI_VERSION}" ]; then
           pip install --upgrade "cumulusci==${CCI_VERSION}"
         else
           pip install --upgrade cumulusci
         fi
-        echo "cci on PATH: $(command -v cci)"
+        echo "::endgroup::"
+        elapsed=$(( $(date +%s) - started ))
+        echo "cci on PATH: $(command -v cci) (installed in ${elapsed}s)"
         cci version
 
     - name: Install the Busbar CumulusCI keychain
@@ -126,7 +130,12 @@ runs:
         KEYCHAIN_CLASS: ${{ inputs.keychain-class }}
       run: |
         set -euo pipefail
+        echo "::group::Installing the Busbar CumulusCI keychain (${KEYCHAIN_PACKAGE})"
+        started=$(date +%s)
         pip install "${KEYCHAIN_PACKAGE}"
+        echo "::endgroup::"
+        elapsed=$(( $(date +%s) - started ))
+        echo "keychain package installed in ${elapsed}s"
         python - <<'PY'
         import importlib, os
         mod, name = os.environ["KEYCHAIN_CLASS"].rsplit(".", 1)
