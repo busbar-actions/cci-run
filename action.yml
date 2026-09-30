@@ -1,193 +1,258 @@
-name: 'Busbar — run CumulusCI under the nono sandbox'
+name: 'Busbar — cci-run'
 description: >-
-  Run a CumulusCI flow/task against a Busbar-equipped Salesforce org with the
-  OIDC-minted session injected proxy-side (cci never holds the token) and the
-  process confined by nono (filesystem grants + ProxyOnly egress). Backed by the
-  busbar-sandbox-run binary; self-mints via GitHub OIDC — the caller job MUST
-  grant `permissions: id-token: write` and the org must have an active trust rule
-  for this repository/workflow.
+  Run one CumulusCI task (a Bulk API 1.0 query, or anonymous Apex committed in
+  this repository) against a Busbar-equipped Salesforce org, with a CumulusCI
+  installed from a hash-locked requirements file and confined by the busbar
+  sandbox. The session is minted in-process via GitHub OIDC and injected
+  proxy-side only into requests the Salesforce request policy and this
+  repository's Cedar policies allowed after inspecting them in full; cci never
+  holds the token. The caller job MUST grant `permissions: id-token: write,
+  contents: read`, and the org must trust this workflow.
 author: 'busbar.agency'
 branding:
   icon: 'shield'
   color: 'green'
 
+# WHAT RUNS: the purpose-built `cci-run` binary (package cci-cli in
+# busbar-extensions). It accepts a closed action document (CciAction JSON):
+#
+#   {"action":"task_query","object":"Account",
+#    "soql":"SELECT Id, Name FROM Account","result_file":".busbar/out/accounts.csv"}
+#   {"action":"task_execute_anon","apex_file":"scripts/apex/seed.apex"}
+#
+# and nothing else: no free-form cci arguments, no `org` field, no flows, no
+# inline Apex (`apex` is refused).
+#
+# ENFORCEMENT: if the request policy cannot inspect a request, the request gets
+# no credential. There is no unenforced mode, opt-out or toggle. Every request
+# CumulusCI sends is shown to the policy in full (request line, headers, body)
+# before the credential is injected, and decided by what it does, not by which
+# CumulusCI release sent it: the Bulk job documents by what they say, the
+# batch must be the declared SOQL byte for byte. The proxy removes every
+# header it does not forward before the policy sees the request (the request
+# goes on without it) and the policy checks the rest by meaning; a project
+# can have more headers forwarded in `.busbar/door.toml` on its default
+# branch. Payload content (SOQL, Bulk job documents, the Apex) is parsed only
+# in a confined, credential-free helper process.
+#
+# REPOSITORY POLICIES: every run applies this repository's
+# `.busbar/policies/*.cedar` (and `.busbar/door.toml`, if there is one), read
+# from the head of the default branch when the run starts. Anonymous Apex is approval-class: it runs only when a policy
+# permits it and none forbids it (no policy files => it is refused). Any policy
+# may forbid anything, for example a query whose risk score is too high for a
+# production org. An invalid policy set fails the run before anything starts.
+#
+# COMMIT-BOUND APEX: `task_execute_anon` runs the file at `apex_file`
+# (repository-relative) as it is at the commit the job's SIGNED OIDC token
+# names (`sha`), read through the GitHub REST API, never from the checkout.
+#
+# AUTH (zero stored credentials): the binary mints its own short-lived session
+# from the runner's OIDC id-token at `target-instance` and holds it in the
+# supervisor's memory; it is revoked and zeroized at the end. No Salesforce
+# token is an input, an output or written to GITHUB_ENV. (`github-token` is a
+# read-only GitHub token the supervisor alone uses to read the repository's
+# policies and the committed Apex; it is never given to CumulusCI.)
+#
+# JOB PERMISSIONS (every task): id-token: write, contents: read
+#   (a job that sets `permissions:` gets `none` for everything it omits).
+#   `actions: read` is not needed: nothing reads GitHub Environment or
+#   branch protection (GitHub enforces neither on private repositories on its
+#   Free, Pro and Team plans, so the check would prove nothing).
+
 inputs:
-  target-instance:
-    description: 'Instance URL of the Busbar-equipped org (e.g. https://my.my.salesforce.com).'
-    required: true
-  cci-args:
+  action:
     description: >-
-      CumulusCI arguments, e.g. `task run query --org dev -o object Organization
-      -o query "SELECT Id, Name FROM Organization"` or `flow run dev_org --org dev`.
+      The CciAction JSON document:
+      {"action":"task_query","object","soql","result_file"} or
+      {"action":"task_execute_anon","apex_file"}. Unknown fields (including the
+      retired `org` and the inline `apex`) are refused. `result_file` is
+      relative to `working-directory`; `apex_file` is relative to the
+      repository root (no `..`, not absolute, not under `.git`).
     required: true
-  org-name:
-    description: 'cci org name to register via the EnvironmentProjectKeychain (matches --org in cci-args).'
-    required: false
-    default: 'dev'
-  cumulusci-version:
-    description: 'pip version spec for CumulusCI (empty => latest).'
+  target-instance:
+    description: 'Instance URL of the Busbar-equipped org (e.g. https://my.my.salesforce.com, no trailing slash).'
+    required: true
+  token-handler:
+    description: 'Apex token-exchange handler developer name in the org. Empty => busbar-auth default (GitHubTokenExchangeHandler).'
     required: false
     default: ''
+  eca-client-id:
+    description: 'Consumer key of the External Client App in the org (non-secret). Empty => busbar-auth default.'
+    required: false
+    default: ''
+  oidc-audience:
+    description: 'OIDC token audience. Empty => target-instance.'
+    required: false
+    default: ''
+  requirements:
+    description: >-
+      Path (relative to the workspace) of a pip requirements lock in hash
+      mode, pinning the CumulusCI to install: every line `name==version
+      --hash=sha256:<hex>` (as `uv pip compile --generate-hashes` or
+      `pip-compile --generate-hashes` write it; markers, pip options, direct
+      references and ranges are refused). Empty => this action's own
+      `cci-lock.txt` (CumulusCI 4.10.1).
+    required: false
+    default: ''
+  github-token:
+    description: >-
+      GitHub token cci-run's supervisor uses to read this repository through
+      the GitHub REST API: the default branch, its `.busbar/policies` and
+      `.busbar/door.toml`, and, for task_execute_anon, the committed Apex file
+      at the job's signed commit. Needs `contents: read`: with the default
+      (the job's own token) grant `permissions: contents: read`. Never given
+      to CumulusCI.
+    required: false
+    default: ${{ github.token }}
   working-directory:
-    description: 'CumulusCI project directory (must contain cumulusci.yml).'
+    description: 'Directory holding cumulusci.yml (only that file is read, into a private shadow project). result_file is written relative to it.'
     required: false
     default: '.'
-  allow-hosts:
-    description: 'Extra hosts the sandboxed child may reach over a plain CONNECT tunnel (comma-separated). The org host is always allowed.'
+  expect-denial:
+    description: >-
+      Negative test: pass (exit 0) only when THIS denial stopped the run and
+      nothing it names was allowed. A selector: a rule (B1, B1a, B2, B2r, B3,
+      B4, B5, B6, B7, B8, B11, grant, ledger), a repository-policy outcome
+      (`approval-class`: approval-class Apex no policy permits; `policy`: a
+      policy forbade, or failed to evaluate) or a route class (e.g.
+      tooling_execute_anonymous, bulk_v1). Empty => normal run. `true` is
+      refused.
     required: false
-    default: 'pypi.org,files.pythonhosted.org'
+    default: ''
+  policy-out:
+    description: 'Path for the run report (the redacted request-policy report with the run context, or the refusal). Empty => <runner.temp>/cci-run-policy.json.'
+    required: false
+    default: ''
+  audit-out:
+    description: 'Path for the observed-endpoint declaration (audit only; `[]` when nothing ran). Empty => <runner.temp>/busbar-sandbox-audit.json.'
+    required: false
+    default: ''
+  artifact-name:
+    description: 'Name of the uploaded artifact (audit, fingerprint, policy report). Must be UNIQUE per cci-run step in a workflow run.'
+    required: false
+    default: 'busbar-sandbox-cci'
   version:
-    description: 'busbar-sandbox-run release tag to download ("latest" resolves the most recent).'
+    description: 'cci-run release tag to download from binary-repo ("latest" resolves the most recent stable release).'
     required: false
     default: 'latest'
   binary-repo:
-    description: 'GitHub repo that publishes the busbar-sandbox-run binary releases.'
+    description: 'GitHub repo that publishes the cci-run binary.'
     required: false
     default: 'busbar-actions/actions-dist'
-  token-handler:
-    description: >-
-      OIDC token-exchange handler developer name in the org. Empty/default =>
-      busbar-auth's default (GitHubTokenExchangeHandler).
-    required: false
-    default: 'GitHubTokenExchangeHandler'
-  eca-client-id:
-    description: 'Optional ECA consumer-key override for the OIDC exchange (empty => busbar-auth default).'
-    required: false
-    default: ''
-  keychain-package:
-    description: >-
-      pip install spec for the Busbar CumulusCI keychain (e.g. a path such as
-      "$GITHUB_WORKSPACE/cumulusci" in the checked-out project, or a git URL).
-      Empty => the keychain class must already be importable in the environment.
-    required: false
-    default: ''
-  keychain-class:
-    description: 'Dotted path of the CumulusCI keychain class that provisions the org through the Busbar proxy.'
-    required: false
-    default: 'busbar_cci_keychain.BusbarKeychain'
-  audit-out:
-    description: >-
-      Path to write the observed-endpoint declaration (host+method+path+decision,
-      distilled from the proxy audit stream). Empty => not written.
-    required: false
-    default: ''
-  allowlist:
-    description: >-
-      Path to an endpoint declaration (from a prior audit-out run) to ENFORCE:
-      the org route becomes default-deny, allowing only the recorded endpoints
-      (dynamic path segments generalized to `*`). Empty => no enforcement.
-    required: false
-    default: ''
-  expect-denial:
-    description: >-
-      Invert the exit code for NEGATIVE enforcement tests. When `true`, this action
-      SUCCEEDS (exit 0) if the sandboxed cci command is DENIED (fails, e.g. by the
-      `allowlist`) and FAILS if it unexpectedly succeeds — so the step does not
-      surface a spurious "Process completed with exit code 1".
-    required: false
-    default: 'false'
-  artifact-name:
-    description: >-
-      Name for the uploaded audit + generalized-fingerprint artifact. Must be
-      UNIQUE within a workflow run — set a distinct value per cci-run step in a
-      multi-step job (upload-artifact rejects duplicate names).
-    required: false
-    default: 'busbar-sandbox-cci'
+
+outputs:
+  success:
+    description: '"true" only when the cci task ran and exited 0.'
+    value: ${{ steps.exec.outputs.success }}
+  exit-code:
+    description: 'The cci task exit code (empty when it never started).'
+    value: ${{ steps.exec.outputs.exit-code }}
+  result-file:
+    description: 'task_query: the result file, relative to working-directory, once written.'
+    value: ${{ steps.exec.outputs.result-file }}
+  apex-digest:
+    description: 'task_execute_anon: sha256 of "\n" + the committed apex_file (hex), the exact bytes Salesforce compiles; set once the file was read at the signed commit.'
+    value: ${{ steps.exec.outputs.apex-digest }}
+  risk:
+    description: 'The declared operation''s risk score (0-100) from the request policy''s versioned scorer: the query''s for task_query, the committed Apex''s for task_execute_anon. Empty when the run stopped before the session was bound.'
+    value: ${{ steps.exec.outputs.risk }}
+  cumulusci-version:
+    description: 'The CumulusCI version the installed CumulusCI reports.'
+    value: ${{ steps.exec.outputs.cumulusci-version || steps.install.outputs.cumulusci-version }}
+  org-kind:
+    description: 'The classified org kind (scratch, sandbox, production), or `unclassified` when the run stopped before the org was read.'
+    value: ${{ steps.exec.outputs.org-kind }}
+  claim-status:
+    description: '`eligible`, `ineligible`, or `refused` when nothing ran.'
+    value: ${{ steps.exec.outputs.claim-status }}
+  denials:
+    description: 'How many requests the Salesforce request policy denied.'
+    value: ${{ steps.exec.outputs.denials }}
+  policy-report:
+    description: 'Path of the run report written for this run.'
+    value: ${{ steps.exec.outputs.policy-report }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Install the busbar-sandbox-run binary from actions-dist (<1s)
+    - name: Install the cci-run binary from actions-dist
       uses: busbar-actions/setup@main
       with:
-        binary: busbar-sandbox-run
+        binary: cci-run
         version: ${{ inputs.version }}
         binary-repo: ${{ inputs.binary-repo }}
 
-    - name: Install CumulusCI
+    # The base interpreter the hash-locked install is built from. It does not
+    # change the calling job's environment (update-environment: false): only
+    # its path is used, and cci-run clears every child's environment anyway.
+    - name: Set up CPython 3.12
+      id: py
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: '3.12'
+        update-environment: false
+
+    # For each line of the requirements lock, the file to fetch is chosen from
+    # PyPI's JSON API (pypi.org) among the files whose SHA-256 the lock lists,
+    # downloaded from files.pythonhosted.org only and verified against the
+    # lock, then installed offline with `pip --require-hashes --no-index`
+    # inside the sandbox with the network blocked. A fresh venv per step, so
+    # several cci-run steps can share a job.
+    - name: Install CumulusCI from the hash-locked requirements
+      id: install
       shell: bash
       env:
-        CCI_VERSION: ${{ inputs.cumulusci-version }}
+        PYTHON: ${{ steps.py.outputs.python-path }}
+        INPUT_REQUIREMENTS: ${{ inputs.requirements }}
       run: |
         set -euo pipefail
-        echo "::group::Installing CumulusCI${CCI_VERSION:+ ${CCI_VERSION}} (pip install cumulusci + ~40 transitive deps)"
-        started=$(date +%s)
-        if [ -n "${CCI_VERSION}" ]; then
-          pip install --upgrade "cumulusci==${CCI_VERSION}"
-        else
-          pip install --upgrade cumulusci
-        fi
-        echo "::endgroup::"
-        elapsed=$(( $(date +%s) - started ))
-        echo "cci on PATH: $(command -v cci) (installed in ${elapsed}s)"
-        cci version
+        requirements="${INPUT_REQUIREMENTS:-$GITHUB_ACTION_PATH/cci-lock.txt}"
+        mkdir -p "$RUNNER_TEMP/busbar-cci"
+        venv="$(mktemp -d "$RUNNER_TEMP/busbar-cci/venv.XXXXXX")"
+        cci-run install --python "$PYTHON" --venv "$venv" --requirements "$requirements"
+        echo "venv=$venv" >> "$GITHUB_OUTPUT"
 
-    - name: Install the Busbar CumulusCI keychain
-      if: ${{ inputs.keychain-package != '' }}
+    # Every input reaches the binary through the environment or a file, never
+    # through shell interpolation or eval.
+    - name: Run the CciAction under the busbar sandbox
+      id: exec
       shell: bash
       env:
-        KEYCHAIN_PACKAGE: ${{ inputs.keychain-package }}
-        KEYCHAIN_CLASS: ${{ inputs.keychain-class }}
-      run: |
-        set -euo pipefail
-        echo "::group::Installing the Busbar CumulusCI keychain (${KEYCHAIN_PACKAGE})"
-        started=$(date +%s)
-        pip install "${KEYCHAIN_PACKAGE}"
-        echo "::endgroup::"
-        elapsed=$(( $(date +%s) - started ))
-        echo "keychain package installed in ${elapsed}s"
-        python - <<'PY'
-        import importlib, os
-        mod, name = os.environ["KEYCHAIN_CLASS"].rsplit(".", 1)
-        getattr(importlib.import_module(mod), name)
-        print(f"keychain {os.environ['KEYCHAIN_CLASS']} import OK")
-        PY
-
-    - name: Run CumulusCI under the busbar sandbox
-      shell: bash
-      env:
-        # OIDC self-mint target for busbar-auth (no SF_ACCESS_TOKEN => OIDC).
+        INPUT_ACTION: ${{ inputs.action }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_EXPECT_DENIAL: ${{ inputs.expect-denial }}
+        POLICY_OUT: ${{ inputs.policy-out != '' && inputs.policy-out || format('{0}/cci-run-policy.json', runner.temp) }}
+        VENV: ${{ steps.install.outputs.venv }}
+        # Read by cci-run's supervisor only (from its environment: there is no
+        # command-line flag, so the token never shows in a process list), to
+        # read the repository's policies and the committed Apex. Every
+        # sandboxed child starts from an empty environment and is refused any
+        # GITHUB_* variable; the decode helper gets no environment at all.
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        # OIDC self-mint (busbar-auth); empty values fall back to its defaults.
         SF_INSTANCE_URL: ${{ inputs.target-instance }}
-        # Handler dev name (empty => busbar-auth's default, GitHubTokenExchangeHandler).
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
         ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
-        # Sandbox config (consumed by busbar-sandbox-run, not by cci).
-        BUSBAR_SANDBOX_WORKDIR: ${{ inputs.working-directory }}
-        BUSBAR_SANDBOX_ALLOW_HOSTS: ${{ inputs.allow-hosts }}
-        # Always write the {org}-masked endpoint declaration + the generalized
-        # capability fingerprint (uploaded as artifacts below). `audit-out`
-        # overrides the declaration path (e.g. to feed a later enforce step).
+        OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+        # Audit only: the {org}-masked endpoint declaration and the generalized
+        # fingerprint. Never fed back into enforcement.
         BUSBAR_SANDBOX_AUDIT_OUT: ${{ inputs.audit-out != '' && inputs.audit-out || format('{0}/busbar-sandbox-audit.json', runner.temp) }}
         BUSBAR_SANDBOX_FINGERPRINT_OUT: ${{ format('{0}/busbar-sandbox-fingerprint.json', runner.temp) }}
-        # Enforce a prior declaration as a default-deny endpoint allowlist.
-        BUSBAR_SANDBOX_ALLOWLIST: ${{ inputs.allowlist }}
-        # The org is provided by the Busbar keychain: it synthesizes an OrgConfig
-        # from SF_INSTANCE_URL and resolves the REAL identity through the proxy.
-        # No CUMULUSCI_ORG_* blob, no fabricated token, no invented org id.
-        CUMULUSCI_KEYCHAIN_CLASS: ${{ inputs.keychain-class }}
-        BUSBAR_CCI_ORG: ${{ inputs.org-name }}
-        CCI_ARGS: ${{ inputs.cci-args }}
-        EXPECT_DENIAL: ${{ inputs.expect-denial }}
       run: |
         set -euo pipefail
-        echo "Running (sandboxed; SF session injected proxy-side): cci ${CCI_ARGS}"
-        # Parse CCI_ARGS into argv while RESPECTING quotes, so a SOQL string with
-        # spaces (e.g. -o query "SELECT ...") stays a single argument, then run
-        # under the sandbox.
-        eval "set -- ${CCI_ARGS}"
-        if [ "${EXPECT_DENIAL}" = "true" ]; then
-          # Negative enforcement test: the command MUST be denied. Invert the exit
-          # so this step passes cleanly (no spurious "exit code 1" annotation).
-          if busbar-sandbox-run cci "$@"; then
-            echo "::error::expected the sandboxed cci command to be DENIED, but it succeeded"
-            exit 1
-          fi
-          echo "✓ sandboxed cci command was denied as expected"
-        else
-          busbar-sandbox-run cci "$@"
+        work="$(mktemp -d "$RUNNER_TEMP/busbar-cci/exec.XXXXXX")"
+        printf '%s\n' "$INPUT_ACTION" > "$work/action.json"
+        args=(exec
+          --action "@$work/action.json"
+          --venv "$VENV"
+          --working-directory "$INPUT_WORKING_DIRECTORY"
+          --policy-out "$POLICY_OUT")
+        if [[ -n "$INPUT_EXPECT_DENIAL" ]]; then
+          args+=(--expect-denial "$INPUT_EXPECT_DENIAL")
         fi
+        cci-run "${args[@]}"
 
-    - name: Upload sandbox audit + generalized fingerprint
+    - name: Upload the audit, fingerprint and policy report
       if: always()
       uses: actions/upload-artifact@v7
       with:
@@ -195,5 +260,6 @@ runs:
         path: |
           ${{ inputs.audit-out != '' && inputs.audit-out || format('{0}/busbar-sandbox-audit.json', runner.temp) }}
           ${{ format('{0}/busbar-sandbox-fingerprint.json', runner.temp) }}
+          ${{ inputs.policy-out != '' && inputs.policy-out || format('{0}/cci-run-policy.json', runner.temp) }}
         if-no-files-found: warn
         retention-days: 30
